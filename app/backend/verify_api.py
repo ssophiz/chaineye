@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 from fastapi.testclient import TestClient
 
@@ -25,8 +26,15 @@ import main  # noqa: E402
 
 def main_test() -> None:
     with TestClient(main.app) as client:
-        health = client.get("/health")
-        assert health.status_code == 200, health.text
+        deadline = time.monotonic() + 30
+        while True:
+            health = client.get("/health")
+            assert health.status_code == 200, health.text
+            if health.json().get("modelLoaded"):
+                break
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"model did not load in time: {health.text}")
+            time.sleep(0.1)
         assert health.json() == {
             "status": "ok", "modelLoaded": True, "mode": "model"
         }

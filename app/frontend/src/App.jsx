@@ -23,15 +23,26 @@ export default function App() {
 
   useEffect(() => {
     let active = true
-    fetchHealth()
-      .then((health) => {
-        if (active) setProviderMode(health.mode || 'unavailable')
-      })
-      .catch(() => {
-        if (active) setProviderMode('unavailable')
-      })
+    let retryTimer
+
+    const checkHealth = () => {
+      fetchHealth()
+        .then((health) => {
+          if (!active) return
+          setProviderMode(health.mode || 'unavailable')
+          if (!health.modelLoaded) retryTimer = setTimeout(checkHealth, 3000)
+        })
+        .catch(() => {
+          if (!active) return
+          setProviderMode('unavailable')
+          retryTimer = setTimeout(checkHealth, 3000)
+        })
+    }
+
+    checkHealth()
     return () => {
       active = false
+      clearTimeout(retryTimer)
     }
   }, [])
 

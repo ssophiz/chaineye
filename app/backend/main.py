@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 from contextlib import asynccontextmanager
 from typing import List, Literal, Optional
 
@@ -48,6 +49,9 @@ STATE = {
     "mode": "unavailable",   # "model" | "mock" | "unavailable"
     "inference": None,       # the imported inference module (if any)
 }
+
+_MODEL_LOAD_LOCK = threading.Lock()
+_MODEL_LOAD_THREAD: Optional[threading.Thread] = None
 
 
 def _try_load_model() -> None:
@@ -85,9 +89,28 @@ def _try_load_model() -> None:
         )
 
 
+def _start_model_loader() -> None:
+    """Load the model without delaying the web server's port binding."""
+    global _MODEL_LOAD_THREAD
+
+    with _MODEL_LOAD_LOCK:
+        if STATE["model_loaded"]:
+            return
+        if _MODEL_LOAD_THREAD is not None and _MODEL_LOAD_THREAD.is_alive():
+            return
+
+        _MODEL_LOAD_THREAD = threading.Thread(
+            target=_try_load_model,
+            name="chaineye-model-loader",
+            daemon=True,
+        )
+        _MODEL_LOAD_THREAD.start()
+        logger.info("ML model loading started in the background.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _try_load_model()
+    _start_model_loader()
     logger.info("ChainEye backend started in %s mode.", STATE["mode"].upper())
     yield
     logger.info("ChainEye backend shutting down.")
