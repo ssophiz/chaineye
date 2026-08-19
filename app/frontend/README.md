@@ -4,7 +4,7 @@
 Vite + React (JavaScript) + Cytoscape.js 기반 단일 페이지 앱.
 
 ## 화면 구성
-- **입력바**: 비트코인 트랜잭션 ID(txId) 입력 + `분석` 버튼 + 예시 칩
+- **입력바**: Elliptic 데이터셋의 숫자형 트랜잭션 ID(txId) 입력 + `분석` 버튼 + 예시 칩
 - **위험도 패널(좌)**: 0~100 위험 점수 게이지 + 라벨(안전/주의/위험) + 핵심 위험 근거
 - **자금 흐름 그래프(중앙)**: Cytoscape.js 방향 그래프. 대상/고위험 노드는 빨강, 일반 노드는 회색
 - **AI 조사 리포트(우)**: 자동 생성된 한국어 조사 리포트(마크다운-유사 렌더링)
@@ -12,13 +12,14 @@ Vite + React (JavaScript) + Cytoscape.js 기반 단일 페이지 앱.
 ## 실행 방법
 ```bash
 cd app/frontend
-npm install
+npm ci
 npm run dev        # 개발 서버 (기본 http://localhost:5173) — 기본 독립 MOCK 데모
 ```
 프로덕션 빌드:
 ```bash
 npm run build      # dist/ 생성 (기본 same-origin + 실제 API)
 npm run preview    # 빌드 결과 미리보기
+npm test           # Node 내장 테스트 러너
 ```
 
 ## 환경변수(Vite) — MOCK 모드 / 실제 백엔드 / 배포 origin
@@ -47,7 +48,7 @@ npm run preview    # 빌드 결과 미리보기
 npm run dev
 
 # 2) 로컬에서 실제 백엔드로 개발 (별도 origin, CORS 사용)
-#    먼저 백엔드 실행:  .venv\Scripts\python -m uvicorn main:app --port 8000  (app/backend 에서)
+#    먼저 저장소 루트에서 백엔드 실행: python -m uvicorn app.backend.main:app --port 8000
 VITE_USE_MOCK=false VITE_API_BASE=http://localhost:8000 npm run dev
 
 # 3) 프로덕션 빌드 (same-origin, 실제 API) — build 기본값
@@ -58,11 +59,12 @@ VITE_API_BASE=https://api.example.com npm run build
 ```
 
 ## 백엔드 API 계약 (프론트가 호출하는 형태)
-- `POST /score` — body `{"txId":"..."}`
+- `GET /health` — 활성 공급자 `mode`(`model`/`mock`)와 모델 로딩 상태 확인
+- `POST /score` — body `{"txId":"232629023"}` (숫자 문자열만 허용)
   → `{"txId":"...","riskScore":0-100,"label":"illicit|licit","topFactors":[{"feature":"...","impact":0.12}]}`
 - `POST /trace` — body `{"txId":"...","hops":2}`
-  → `{"nodes":[{"id":"...","risk":0-100,"focus":true|false}],"edges":[{"source":"...","target":"..."}]}`
-- `POST /report` — body `{"txId":"...","score":...,"topFactors":[...],"graphStats":{...}}`
+  → `{"nodes":[{"id":"...","risk":0-100,"focus":true|false,"illicit":true|false}],"edges":[...],"paths":[[...]]}`
+- `POST /report` — body `{"txId":"...","score":...,"label":"illicit|licit","topFactors":[...],"graphStats":{...}}`
   → `{"report":"<korean text>"}`
 
 ## 주요 파일

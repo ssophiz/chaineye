@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState } from 'react'
 
 // 아주 가벼운 마크다운-유사 렌더러 (외부 라이브러리 없이).
 // # 제목, ## 소제목, - 목록, > 인용, **굵게** 정도만 처리.
@@ -21,7 +21,7 @@ function renderInline(text, keyPrefix) {
 }
 
 function renderMarkdown(md) {
-  const lines = md.split('\n')
+  const lines = md.replace(/[—–]/g, '-').split('\n')
   const out = []
   lines.forEach((line, idx) => {
     const key = `l${idx}`
@@ -45,24 +45,51 @@ function renderMarkdown(md) {
 }
 
 export default function ReportPanel({ report, loading }) {
+  const [copied, setCopied] = useState(false)
+
+  const copyReport = async () => {
+    if (!navigator.clipboard) return
+    try {
+      await navigator.clipboard.writeText(report)
+      setCopied(true)
+    } catch {
+      setCopied(false)
+      return
+    }
+    window.setTimeout(() => setCopied(false), 1500)
+  }
+
   return (
     <div className="panel report-panel">
       <div className="report-head">
-        <h2 className="panel-title">AI 조사 리포트</h2>
+        <div>
+          <h2 className="panel-title">조사 보고서 초안</h2>
+          <span className="panel-context">모델 수치 기반 | 담당자 검토 필요</span>
+        </div>
         {report && (
           <button
             className="copy-btn"
-            onClick={() => navigator.clipboard?.writeText(report)}
+            type="button"
+            onClick={copyReport}
             title="리포트 원문 복사"
           >
-            복사
+            {copied ? '복사됨' : '복사'}
           </button>
         )}
       </div>
       {loading ? (
-        <div className="empty">리포트 생성 중…</div>
+        <div className="report-skeleton" role="status" aria-busy="true">
+          <div className="skeleton skeleton-line wide" />
+          <div className="skeleton skeleton-line" />
+          <div className="skeleton skeleton-line short" />
+          <div className="skeleton skeleton-block" />
+          <span className="sr-only">조사 보고서 초안을 생성하고 있습니다.</span>
+        </div>
       ) : !report ? (
-        <div className="empty">분석 완료 시 조사 리포트가 생성됩니다.</div>
+        <div className="empty">
+          <strong>보고서 생성 대기</strong>
+          <span>분석 결과가 나오면 근거, 경로, 후속 조치를 자동으로 정리합니다.</span>
+        </div>
       ) : (
         <div className="report-body">{renderMarkdown(report)}</div>
       )}

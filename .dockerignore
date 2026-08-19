@@ -27,7 +27,10 @@ app/ml/gcn/
 # --- ML training-only / verification files not needed at runtime ---
 app/ml/train.py
 app/ml/verify_inference.py
+app/ml/evaluate_feature_ablation.py
 app/ml/feature_importance.csv
+app/ml/feature_table.f32.npy
+app/ml/feature_table.txid.npy
 
 # --- VCS / editor / OS cruft ---
 .git/

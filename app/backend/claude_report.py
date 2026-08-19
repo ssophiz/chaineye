@@ -14,7 +14,7 @@ Anthropic 공식 Python SDK(`anthropic`)를 사용해 FIU/컴플라이언스 스
 
 환경변수:
 - `ANTHROPIC_API_KEY`      — API 키(없으면 LLM 경로 비활성, None 반환).
-- `CHAINEYE_REPORT_MODEL`  — 사용할 모델 ID. 기본값 "claude-sonnet-5".
+- `CHAINEYE_REPORT_MODEL`  — 사용할 모델 ID. 기본값 "claude-opus-5".
 """
 
 from __future__ import annotations
@@ -36,8 +36,9 @@ except Exception as exc:  # noqa: BLE001 - ImportError 및 그 외 모두 흡수
     logger.info("anthropic SDK unavailable (%s) -> LLM report path disabled.", exc)
 
 
-_DEFAULT_MODEL = "claude-sonnet-5"
+_DEFAULT_MODEL = "claude-opus-5"
 _MAX_TOKENS = 2048
+_TIMEOUT_SECONDS = 20.0
 
 
 # report_builder 와 동일한 한글 피처 라벨(프롬프트 근거 제공용).
@@ -66,7 +67,18 @@ def _grade(score: int) -> str:
 
 
 def _feature_ko(feature: str) -> str:
-    return _FEATURE_KO.get(feature, feature)
+    if feature in _FEATURE_KO:
+        return _FEATURE_KO[feature]
+    if feature.startswith("feat_"):
+        try:
+            index = int(feature.removeprefix("feat_"))
+        except ValueError:
+            return feature
+        if 0 <= index <= 92:
+            return f"거래 자체 특성 {index + 1} ({feature})"
+        if 93 <= index <= 164:
+            return f"연결 이웃 집계 특성 {index - 92} ({feature})"
+    return feature
 
 
 def _format_factors(top_factors: List[Dict[str, Any]]) -> str:
@@ -94,11 +106,12 @@ def _build_prompt(
 
     node_count = int(graph_stats.get("nodeCount", 0))
     edge_count = int(graph_stats.get("edgeCount", 0))
-    illicit_neighbors = int(
-        graph_stats.get("illicitNeighbors") or graph_stats.get("highRiskCount", 0)
-    )
-    if illicit_neighbors > 0 and int(score) >= 70:
-        illicit_neighbors = max(0, illicit_neighbors - 1)
+    if "illicitNeighbors" in graph_stats:
+        connected_high_risk = int(graph_stats["illicitNeighbors"])
+    else:
+        connected_high_risk = int(graph_stats.get("highRiskCount", 0))
+        if connected_high_risk > 0 and int(score) >= 70:
+            connected_high_risk = max(0, connected_high_risk - 1)
 
     system = (
         "당신은 대한민국 금융정보분석원(FIU) 및 금융회사 자금세탁방지(AML) 부서를 위한 "
@@ -107,11 +120,15 @@ def _build_prompt(
         "엄격한 규칙:\n"
         "1) 아래에 제공된 수치·라벨·그래프 통계만을 근거로 삼으십시오. 제공되지 않은 사실, "
         "수치, 거래소명, 인물, 지갑 주소를 절대 지어내지 마십시오(환각 금지).\n"
-        "2) 보고서는 반드시 다음 4개 섹션 구조를 그대로 사용하고 각 섹션 제목을 【 】 로 감싸십시오: "
-        "【위험 요약】, 【핵심 판단 근거】, 【자금흐름 관찰】, 【권고 조치】.\n"
+        "2) 보고서는 반드시 다음 4개 섹션 구조를 사용하십시오: "
+        "위험 요약, 핵심 판단 근거, 자금흐름 관찰, 권고 조치.\n"
         "3) 전문적이고 객관적인 어조를 유지하되 간결하게 작성하십시오. 과장하지 마십시오.\n"
         "4) 최종 판단과 보고 여부는 담당 분석관의 검토가 필요함을 명시하십시오.\n"
-        "5) 오직 보고서 본문만 출력하고 서두 인사말이나 메타 설명은 넣지 마십시오."
+        "5) 오직 보고서 본문만 출력하고 서두 인사말이나 메타 설명은 넣지 마십시오.\n"
+        "6) 번역투, 상투적인 결론 문구, 기계적인 병렬 나열, 과도한 괄호·영어 병기를 피하고 "
+        "짧고 직접적인 능동문을 우선하십시오. 사실과 수치의 의미는 바꾸지 마십시오.\n"
+        "7) 보이지 않는 유니코드 문자나 탐지 회피용 표현을 사용하지 마십시오. 이 보고서가 "
+        "자동 생성 자료라는 고지는 유지하십시오."
     )
 
     user = (
@@ -124,8 +141,8 @@ def _build_prompt(
         "- 자금흐름 그래프 통계:\n"
         f"  · 연결 노드 수: {node_count}개\n"
         f"  · 자금 이동(엣지) 수: {edge_count}건\n"
-        f"  · 위험(불법 의심) 이웃 노드 수: {illicit_neighbors}개\n\n"
-        "위 데이터만 사용하여 【위험 요약】/【핵심 판단 근거】/【자금흐름 관찰】/【권고 조치】 "
+        f"  · 추적 범위 내 고위험 연결 노드 수: {connected_high_risk}개\n\n"
+        "위 데이터만 사용하여 위험 요약/핵심 판단 근거/자금흐름 관찰/권고 조치 "
         "4개 섹션으로 보고서를 작성하십시오. 권고 조치는 위험 등급에 맞게 제시하십시오"
         "(위험: 의심거래보고(STR) 검토 등 / 주의: 지속 모니터링 / 안전: 정기 점검)."
     )
@@ -161,7 +178,7 @@ def generate_report_llm(
 
     try:
         system, user = _build_prompt(tx_id, score, label, top_factors, graph_stats)
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(api_key=api_key, timeout=_TIMEOUT_SECONDS)
         response = client.messages.create(
             model=model,
             max_tokens=_MAX_TOKENS,

@@ -10,7 +10,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1 — build the Vite/React frontend into app/frontend/dist
 # -----------------------------------------------------------------------------
-FROM node:20-slim AS frontend
+FROM node:24-slim AS frontend
 
 WORKDIR /build/frontend
 
@@ -46,8 +46,7 @@ WORKDIR /app
 
 # --- Python dependencies (own layer for caching) ---
 COPY deploy/requirements.txt /app/requirements.txt
-RUN pip install --upgrade pip \
-    && pip install -r /app/requirements.txt
+RUN pip install -r /app/requirements.txt
 
 # --- Application code + model artifacts ---
 # ML module + model artifacts (feature_table.parquet is ~58MB — expected).
@@ -61,11 +60,13 @@ COPY --from=frontend /build/frontend/dist /app/app/frontend/dist
 RUN chown -R appuser:appuser /app
 USER appuser
 
-# uvicorn is launched from the backend dir (main.py uses `import mock_provider`
-# etc. as top-level modules and adds ../ml to sys.path itself).
-WORKDIR /app/app/backend
+# Launch as a package so imports behave consistently in tests and production.
+WORKDIR /app
 
 EXPOSE 7860
 
 # Bind 0.0.0.0 and honour the platform-provided $PORT (default 7860 for Spaces).
-CMD ["sh", "-c", "python -m uvicorn main:app --host 0.0.0.0 --port ${PORT:-7860}"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '7860') + '/health', timeout=4)" || exit 1
+
+CMD ["sh", "-c", "python -m uvicorn app.backend.main:app --host 0.0.0.0 --port ${PORT:-7860}"]

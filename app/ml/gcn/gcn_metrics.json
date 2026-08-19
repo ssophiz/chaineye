@@ -25,7 +25,7 @@
   ],
   "train_seconds": 576.1,
   "lightgbm_baseline": {
-    "illicit_f1": 0.776,
-    "roc_auc": 0.936
+    "illicit_f1": 0.8051,
+    "roc_auc": 0.9317
   }
 }

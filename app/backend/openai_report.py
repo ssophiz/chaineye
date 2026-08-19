@@ -3,7 +3,7 @@ OpenAI(GPT) 기반 한글 자금세탁 위험 분석 보고서 생성기 (ChainE
 
 `claude_report.py` 의 OpenAI 대응 버전입니다. 동일한 한글 프롬프트를 재사용하며
 (단일 출처: `claude_report._build_prompt`), OpenAI 공식 Python SDK 의 Chat
-Completions API 로 보고서를 생성합니다.
+Responses API 로 보고서를 생성합니다.
 
 주의: "Codex"(구 code-davinci 계열)는 이미 폐기되었습니다. 현행 OpenAI GPT 채팅
 모델을 사용하며, 모델 ID 는 `CHAINEYE_OPENAI_MODEL` 로 지정합니다.
@@ -17,7 +17,7 @@ Completions API 로 보고서를 생성합니다.
 
 환경변수:
 - `OPENAI_API_KEY`         — API 키(없으면 OpenAI 경로 비활성, None 반환).
-- `CHAINEYE_OPENAI_MODEL`  — 사용할 모델 ID. 기본값 "gpt-4o".
+- `CHAINEYE_OPENAI_MODEL`  — 사용할 모델 ID. 기본값 "gpt-5.6-luna".
 """
 
 from __future__ import annotations
@@ -27,7 +27,10 @@ import os
 from typing import Any, Dict, List, Optional
 
 # 프롬프트는 claude_report 와 100% 공유한다(근거·섹션구조·환각금지 규칙 단일 출처).
-from claude_report import _build_prompt
+try:
+    from .claude_report import _build_prompt
+except ImportError:  # direct execution from app/backend
+    from claude_report import _build_prompt  # type: ignore
 
 logger = logging.getLogger("chaineye.openai_report")
 
@@ -42,8 +45,9 @@ except Exception as exc:  # noqa: BLE001 - ImportError 및 그 외 모두 흡수
     logger.info("openai SDK unavailable (%s) -> OpenAI report path disabled.", exc)
 
 
-_DEFAULT_MODEL = "gpt-4o"
+_DEFAULT_MODEL = "gpt-5.6-luna"
 _MAX_TOKENS = 2048
+_TIMEOUT_SECONDS = 20.0
 
 
 def generate_report_llm(
@@ -53,7 +57,7 @@ def generate_report_llm(
     top_factors: List[Dict[str, Any]],
     graph_stats: Dict[str, Any],
 ) -> Optional[str]:
-    """OpenAI Chat Completions 로 한글 보고서를 생성해 문자열로 반환한다.
+    """OpenAI Responses API 로 한글 보고서를 생성해 문자열로 반환한다.
 
     아래의 어떤 경우에도 예외를 전파하지 않고 None 을 반환한다:
     - openai 패키지 미설치
@@ -75,16 +79,16 @@ def generate_report_llm(
 
     try:
         system, user = _build_prompt(tx_id, score, label, top_factors, graph_stats)
-        client = OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
+        client = OpenAI(api_key=api_key, timeout=_TIMEOUT_SECONDS)
+        response = client.responses.create(
             model=model,
-            max_tokens=_MAX_TOKENS,
-            messages=[
+            max_output_tokens=_MAX_TOKENS,
+            input=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
         )
-        text = (response.choices[0].message.content or "").strip()
+        text = (response.output_text or "").strip()
         if not text:
             logger.warning("OpenAI report returned empty content -> falling back.")
             return None

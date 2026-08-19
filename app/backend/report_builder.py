@@ -5,18 +5,14 @@ No external / paid LLM API is used here — this is the MVP compliance-report
 generator. It renders a structured, professional FIU/compliance-style report
 purely from the inputs.
 
-TODO(claude-api): This template renderer can later be swapped for (or augmented
-by) a Claude API call to produce richer narrative prose. When doing so, keep
-this template as the deterministic fallback for offline / rate-limited use.
-See the `claude-api` skill for model ids and SDK usage. DO NOT implement the
-API call now (MVP requirement: template-based, no paid API).
+The optional Claude/OpenAI paths live in separate modules. This renderer stays
+as the deterministic fallback for offline, rate-limited, and template-only use.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, List
-
 
 # Human-readable Korean labels for known feature names.
 _FEATURE_KO: Dict[str, str] = {
@@ -45,7 +41,18 @@ def _grade(score: int) -> str:
 
 
 def _feature_ko(feature: str) -> str:
-    return _FEATURE_KO.get(feature, feature)
+    if feature in _FEATURE_KO:
+        return _FEATURE_KO[feature]
+    if feature.startswith("feat_"):
+        try:
+            index = int(feature.removeprefix("feat_"))
+        except ValueError:
+            return feature
+        if 0 <= index <= 92:
+            return f"거래 자체 특성 {index + 1} ({feature})"
+        if 93 <= index <= 164:
+            return f"연결 이웃 집계 특성 {index - 92} ({feature})"
+    return feature
 
 
 def _factor_sentence(factor: Dict[str, Any]) -> str:
@@ -72,17 +79,17 @@ def build_report(
 
     node_count = int(graph_stats.get("nodeCount", 0))
     edge_count = int(graph_stats.get("edgeCount", 0))
-    # 프론트엔드는 고위험(위험도 70+) 이웃 수를 highRiskCount 로 전송한다.
-    # illicitNeighbors(구 스키마)가 오면 우선 사용하고, 없으면 highRiskCount 로 폴백.
-    illicit_neighbors = int(
-        graph_stats.get("illicitNeighbors")
-        or graph_stats.get("highRiskCount", 0)
-    )
-    # 초점 노드 자신이 고위험이면 이웃 카운트에서 제외 (자기 자신은 이웃이 아님)
-    if illicit_neighbors > 0 and int(score) >= 70:
-        illicit_neighbors = max(0, illicit_neighbors - 1)
+    # highRiskCount는 추적 그래프 전체의 고위험 노드 수다. 초점 거래가 고위험이면
+    # 연결 노드 통계에서는 자신을 한 건 제외한다. 구 스키마 illicitNeighbors는 이미
+    # 초점 거래가 제외된 값이므로 그대로 사용한다.
+    if "illicitNeighbors" in graph_stats:
+        connected_high_risk = int(graph_stats["illicitNeighbors"])
+    else:
+        connected_high_risk = int(graph_stats.get("highRiskCount", 0))
+        if connected_high_risk > 0 and int(score) >= 70:
+            connected_high_risk = max(0, connected_high_risk - 1)
 
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    generated_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
     # 한 줄 요지
     if grade == "위험":
@@ -106,30 +113,31 @@ def build_report(
         factors_block = "- 제공된 판단 근거(topFactors)가 없습니다."
 
     # 자금흐름 관찰
-    if node_count > 0:
-        neighbor_ratio = (illicit_neighbors / node_count) * 100.0
+    neighbor_count = max(node_count - 1, 0)
+    if neighbor_count > 0:
+        neighbor_ratio = (connected_high_risk / neighbor_count) * 100.0
     else:
         neighbor_ratio = 0.0
     flow_block = f"- 추적 그래프 내 연결 노드 수: 총 {node_count:,}개"
     if edge_count > 0:
         flow_block += f" / 자금 이동(엣지) {edge_count:,}건"
     flow_block += (
-        f"\n- 위험(불법 의심) 이웃 노드 수: {illicit_neighbors:,}개 "
+        f"\n- 추적 범위 내 고위험 연결 노드 수: {connected_high_risk:,}개 "
         f"(전체의 약 {neighbor_ratio:.1f}%)"
     )
-    if illicit_neighbors > 0:
+    if connected_high_risk > 0:
         flow_block += (
-            "\n- 위험 이웃과의 직접 연결이 확인되어 자금 혼합·경유 가능성을 배제할 수 없습니다."
+            "\n- 고위험 연결 노드가 포함되어 있어 자금의 유입·유출 경로를 추가로 확인해야 합니다."
         )
     else:
-        flow_block += "\n- 직접 연결된 위험 이웃은 확인되지 않았습니다."
+        flow_block += "\n- 현재 추적 범위에서는 별도의 고위험 연결 노드가 확인되지 않았습니다."
 
     # 권고 조치 (등급별)
     if grade == "위험":
         action_block = (
             "- 의심거래보고(STR) 작성 및 보고 여부를 우선 검토하십시오.\n"
             "- 해당 주소/거래에 대한 계좌·지갑 모니터링을 강화하십시오.\n"
-            "- 연결된 위험 이웃 노드를 포함하여 자금흐름을 수사 참고자료로 정리하십시오.\n"
+            "- 추적 범위의 고위험 연결 노드를 포함해 자금흐름을 수사 참고자료로 정리하십시오.\n"
             "- 필요 시 거래소 KYC 정보 및 트래블룰(Travel Rule) 대상 여부를 확인하십시오."
         )
     elif grade == "주의":
@@ -144,31 +152,30 @@ def build_report(
             "- 향후 위험 신호 변화 시 재평가하십시오."
         )
 
-    report = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 체인아이(ChainEye) 자금세탁 위험 분석 보고서
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 대상 거래 ID : {tx_id}
- 위험 점수    : {int(score)} / 100  (등급: {grade})
- 모델 판정    : {label_ko}
- 생성 일시    : {generated_at}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    report = f"""# 자금세탁 위험 분석 보고서
 
-【위험 요약】
-등급: {grade} (위험 점수 {int(score)}점)
+- **대상 거래 ID:** `{tx_id}`
+- **위험 점수:** {int(score)} / 100
+- **모델 판정:** {label_ko}
+- **생성 일시:** {generated_at}
+
+## 위험 요약
+
+**{grade} 등급, {int(score)}점.**
 {summary_line}
 
-【핵심 판단 근거】
+## 핵심 판단 근거
+
 {factors_block}
 
-【자금흐름 관찰】
+## 자금흐름 관찰
+
 {flow_block}
 
-【권고 조치】
+## 권고 조치
+
 {action_block}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ※ 본 보고서는 체인아이 자동 분석 결과이며, 최종 판단과
-    보고 여부 결정은 담당 분석관의 검토를 거쳐야 합니다.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+> 본 문서는 체인아이의 자동 분석 초안입니다. 최종 판단과 보고 여부는 담당 분석관이 검토해야 합니다."""
 
     return report

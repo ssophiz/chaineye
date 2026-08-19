@@ -9,7 +9,9 @@ score_tx() and trace_tx().
     inference.score_tx("230425980")
     inference.trace_tx("230425980", hops=2)
 """
+import json
 import os
+import warnings
 from functools import lru_cache
 
 import joblib
@@ -26,6 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(HERE, "chaineye_model.pkl")
 FEATURE_TABLE_PATH = os.path.join(HERE, "feature_table.parquet")
 EDGES_PATH = os.path.join(HERE, "edges.parquet")
+METRICS_PATH = os.path.join(HERE, "metrics.json")
 
 N_FEATURES = 165
 FEATURE_COLS = [f"feat_{i}" for i in range(N_FEATURES)]
@@ -39,30 +42,46 @@ _EDGES = None           # DataFrame with columns txId1, txId2 (int64)
 _ADJ = None             # dict: node -> set(neighbors) (undirected, for tracing)
 _EXPLAINER = None       # shap.TreeExplainer (built lazily on first explanation)
 _EXPECTED_VALUE = 0.0   # SHAP base value for the illicit class
+_DECISION_THRESHOLD = 0.5
 
 
 def load() -> None:
     """Load model + feature table + graph into module globals. Idempotent."""
-    global _MODEL, _FEAT_MATRIX, _ROW_IDX, _EDGES, _ADJ
+    global _MODEL, _FEAT_MATRIX, _ROW_IDX, _EDGES, _ADJ, _DECISION_THRESHOLD
     if _MODEL is not None:
         return
 
-    _MODEL = joblib.load(MODEL_PATH)
+    # Build every resource locally and publish the globals only after all steps
+    # succeed. A partial load must remain retryable.
+    model = joblib.load(MODEL_PATH)
+    with open(METRICS_PATH, encoding="utf-8") as metrics_file:
+        metrics = json.load(metrics_file)
+    decision_threshold = float(metrics.get("threshold", 0.5))
+    if not 0 < decision_threshold < 1:
+        raise ValueError("metrics threshold must be between 0 and 1")
 
     # memory-mapped float32 feature matrix + txId->row index (near-zero RSS;
     # avoids the large transient allocation of pd.read_parquet on this file)
-    _FEAT_MATRIX, _ROW_IDX = _fs.load_feature_matrix(FEATURE_TABLE_PATH)
+    feat_matrix, row_idx = _fs.load_feature_matrix(FEATURE_TABLE_PATH)
 
-    _EDGES = pd.read_parquet(EDGES_PATH)
+    edges = pd.read_parquet(EDGES_PATH)
+    required_edge_cols = {"txId1", "txId2"}
+    if not required_edge_cols.issubset(edges.columns):
+        raise ValueError(f"edge table is missing columns: {required_edge_cols - set(edges.columns)}")
 
     # build undirected adjacency for neighborhood tracing
     adj = {}
-    src = _EDGES["txId1"].to_numpy()
-    dst = _EDGES["txId2"].to_numpy()
+    src = edges["txId1"].to_numpy()
+    dst = edges["txId2"].to_numpy()
     for a, b in zip(src, dst):
         adj.setdefault(a, set()).add(b)
         adj.setdefault(b, set()).add(a)
+    _MODEL = model
+    _FEAT_MATRIX = feat_matrix
+    _ROW_IDX = row_idx
+    _EDGES = edges
     _ADJ = adj
+    _DECISION_THRESHOLD = decision_threshold
 
     # NOTE: the SHAP explainer is built lazily on first explanation
     # (see _ensure_explainer) so that trace-only workloads never pay for it.
@@ -104,6 +123,14 @@ def _feature_row(tx_int):
     return np.array(_FEAT_MATRIX[i], dtype=np.float32).reshape(1, -1)
 
 
+def contains_tx(tx_id: str) -> bool:
+    """Return whether the transaction has model features available."""
+    if _MODEL is None:
+        load()
+    tx_int = _to_int(tx_id)
+    return tx_int is not None and tx_int in _ROW_IDX
+
+
 @lru_cache(maxsize=100000)
 def _proba(tx_int):
     """Illicit probability for a node with features, else None. Cached."""
@@ -136,11 +163,17 @@ def score_tx(tx_id: str) -> dict:
 
     proba = float(_MODEL.predict_proba(x)[:, 1][0])
     risk = int(round(proba * 100))
-    label = "illicit" if proba >= 0.5 else "licit"
+    label = "illicit" if proba >= _DECISION_THRESHOLD else "licit"
 
     # per-prediction SHAP (explainer built lazily on first call)
     _ensure_explainer()
-    sv = _EXPLAINER.shap_values(x)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="LightGBM binary classifier with TreeExplainer shap values output.*",
+            category=UserWarning,
+        )
+        sv = _EXPLAINER.shap_values(x)
     if isinstance(sv, list):        # binary -> list per class; take illicit
         sv = sv[-1]
     sv = np.asarray(sv)
@@ -199,24 +232,29 @@ def trace_tx(tx_id: str, hops: int = 2) -> dict:
             "paths": [],
         }
 
-    # BFS up to `hops` on the undirected adjacency
+    # Bounded BFS on the undirected adjacency. Limiting each frontier prevents a
+    # dense 4-hop request from materialising a huge neighborhood before the
+    # response cap is applied.
+    hop_count = max(0, min(int(hops), 4))
     visited = {focus}
     frontier = {focus}
-    for _ in range(max(hops, 0)):
-        nxt = set()
+    neighbors = []
+    for _ in range(hop_count):
+        candidates = set()
         for node in frontier:
-            nxt |= _ADJ.get(node, set())
-        nxt -= visited
-        visited |= nxt
-        frontier = nxt
+            candidates |= _ADJ.get(node, set())
+        candidates -= visited
+        remaining = MAX_TRACE_NODES - 1 - len(neighbors)
+        if remaining <= 0:
+            break
+        # Prefer high-risk nodes at each distance, with txId as a stable tie-breaker.
+        selected = sorted(candidates, key=lambda n: (-_risk_int(n), int(n)))[:remaining]
+        neighbors.extend(selected)
+        frontier = set(selected)
+        visited.update(selected)
         if not frontier:
             break
 
-    # cap nodes: always keep focus, then highest-risk neighbors
-    neighbors = [n for n in visited if n != focus]
-    if len(neighbors) + 1 > MAX_TRACE_NODES:
-        neighbors.sort(key=lambda n: _risk_int(n), reverse=True)
-        neighbors = neighbors[: MAX_TRACE_NODES - 1]
     kept = set(neighbors) | {focus}
 
     # risk lookup for every kept node (computed once, reused below)
@@ -252,7 +290,7 @@ def trace_tx(tx_id: str, hops: int = 2) -> dict:
     for a, b in zip(sub["txId1"].to_numpy(), sub["txId2"].to_numpy()):
         dadj.setdefault(a, []).append(b)
 
-    max_len_nodes = max(int(hops), 1) + 1
+    max_len_nodes = max(hop_count, 1) + 1
     paths = []
     seen_paths = set()
 

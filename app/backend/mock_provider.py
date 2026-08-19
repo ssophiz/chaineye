@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Dict, List
 
-
 # Candidate feature names that resemble a real Bitcoin AML feature set
 # (Elliptic-style local + aggregate features).
 _FEATURES: List[str] = [
@@ -84,7 +83,6 @@ def trace_tx(tx_id: str, hops: int = 2) -> Dict[str, Any]:
     the result includes a top-level "paths" list of suspicious directed chains.
     """
     hops = max(1, min(int(hops), 4))
-    seed = _seed(tx_id)
 
     nodes: List[Dict[str, Any]] = [
         {"id": tx_id, "risk": _node_risk(tx_id), "focus": True}

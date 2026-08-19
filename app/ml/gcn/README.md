@@ -34,7 +34,7 @@ C:/Users/DELL/fsec-ai-challenge-2026/.venv/Scripts/python.exe app/ml/gcn/gcn_tra
 
 | Model                 | Illicit Precision | Illicit Recall | Illicit F1 | ROC-AUC |
 |-----------------------|:-----------------:|:--------------:|:----------:|:-------:|
-| LightGBM (baseline)   |        —          |       —        | **0.776**  | **0.936** |
+| LightGBM (baseline)   |      0.894        |     0.732      | **0.805**  | **0.932** |
 | **GCN (this model)**  |      0.561        |     0.563      | **0.562**  | **0.892** |
 
 Test set: 16,670 labeled nodes (1,083 illicit / 15,587 licit).
@@ -50,7 +50,7 @@ Full metrics in [`gcn_metrics.json`](gcn_metrics.json).
 ## Comparison to LightGBM
 
 On the same temporal split, the GCN reaches **illicit-F1 0.562 and ROC-AUC 0.892**,
-below the LightGBM baseline's **0.776 / 0.936**. This gap is the well-documented pattern
+below the LightGBM baseline's **0.805 / 0.932**. This gap is the well-documented pattern
 on Elliptic: because the 165 hand-engineered features are already highly discriminative,
 gradient-boosted trees exploit them directly, whereas a plain GCN smooths each node's
 signal against its neighbourhood — which helps recall on structurally-embedded illicit
@@ -86,6 +86,6 @@ model.eval()
 # standardize new features with ckpt["feat_mean"] / ckpt["feat_std"] before forward()
 ```
 
-*Note:* per-epoch logging shows illicit-F1 peaking near **0.61 around epoch 100** before
-settling; the saved checkpoint is the epoch-400 model (ROC-AUC 0.892). Early-stopping on a
-validation slice would recover a slightly higher F1 and is a cheap future improvement.
+*Note:* this is a fixed 400-epoch exploratory checkpoint. Training logs no longer inspect
+the future test mask each epoch. Any future architecture or early-stopping selection must
+use a separate temporal validation window before the final test evaluation.

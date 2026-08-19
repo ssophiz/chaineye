@@ -182,22 +182,10 @@ def main():
         loss.backward()
         optimizer.step()
         if epoch % 50 == 0 or epoch == 1:
-            model.eval()
-            with torch.no_grad():
-                logits = model(data.x, data.edge_index)
-                proba = F.softmax(logits, dim=1)[:, 1]
-                pred = (proba >= 0.5).long()
-                yte = data.y[test_idx].cpu().numpy()
-                pte = pred[test_idx].cpu().numpy()
-                pr = precision_recall_fscore_support(
-                    yte, pte, labels=[1], average=None, zero_division=0)
-                try:
-                    auc = roc_auc_score(yte, proba[test_idx].cpu().numpy())
-                except ValueError:
-                    auc = float("nan")
-                print(f"  epoch {epoch:4d}  loss={loss.item():.4f}  "
-                      f"test illicit P={pr[0][0]:.3f} R={pr[1][0]:.3f} "
-                      f"F1={pr[2][0]:.3f}  ROC-AUC={auc:.3f}")
+            # Keep the future test mask untouched until the fixed 400-epoch
+            # training run is complete. Model selection belongs on a separate
+            # temporal validation mask, not on test telemetry.
+            print(f"  epoch {epoch:4d}  train_loss={loss.item():.4f}")
     train_secs = time.time() - t0
     print(f"[train] done in {train_secs:.1f}s")
 
@@ -240,7 +228,7 @@ def main():
         "pr_auc": pr_auc,
         "confusion_matrix": cm.tolist(),
         "train_seconds": round(train_secs, 1),
-        "lightgbm_baseline": {"illicit_f1": 0.776, "roc_auc": 0.936},
+        "lightgbm_baseline": {"illicit_f1": 0.8051, "roc_auc": 0.9317},
     }
     METRICS_JSON.write_text(json.dumps(metrics, indent=2))
     print(f"\n[save] metrics -> {METRICS_JSON}")

@@ -19,6 +19,7 @@ Values are identical to the parquet (already float32), so model outputs are
 unchanged.
 """
 import os
+
 import numpy as np
 
 N_FEATURES = 165
@@ -35,7 +36,21 @@ def _cache_is_valid(mat_path: str, tx_path: str, parquet_path: str) -> bool:
         return False
     # rebuild if the source parquet is newer than the cache
     src_m = os.path.getmtime(parquet_path)
-    return os.path.getmtime(mat_path) >= src_m and os.path.getmtime(tx_path) >= src_m
+    if os.path.getmtime(mat_path) < src_m or os.path.getmtime(tx_path) < src_m:
+        return False
+    try:
+        matrix = np.load(mat_path, mmap_mode="r")
+        txids = np.load(tx_path, mmap_mode="r")
+        return (
+            matrix.ndim == 2
+            and matrix.shape[1] == N_FEATURES
+            and matrix.dtype == np.float32
+            and txids.ndim == 1
+            and txids.dtype == np.int64
+            and matrix.shape[0] == txids.shape[0]
+        )
+    except (OSError, ValueError):
+        return False
 
 
 def _build_cache(parquet_path: str, mat_path: str, tx_path: str) -> None:
@@ -44,32 +59,42 @@ def _build_cache(parquet_path: str, mat_path: str, tx_path: str) -> None:
     pf = pq.ParquetFile(parquet_path)
     n = pf.metadata.num_rows
 
-    tmp_mat = mat_path + ".tmp"
-    tmp_tx = tx_path + ".tmp"
+    # Per-process temp names allow concurrent container workers to build safely;
+    # os.replace publishes only complete NumPy files.
+    suffix = f".{os.getpid()}.tmp"
+    tmp_mat = mat_path + suffix
+    tmp_tx = tx_path + suffix
 
     # write matrix straight into an on-disk memmap, one column at a time so we
     # never hold more than a single decompressed column in RAM at once
-    mm = np.lib.format.open_memmap(
-        tmp_mat, mode="w+", dtype=np.float32, shape=(n, N_FEATURES)
-    )
     try:
-        for j, name in enumerate(FEATURE_COLS):
-            tbl = pq.read_table(parquet_path, columns=[name])
-            mm[:, j] = tbl.column(0).to_numpy(zero_copy_only=False)
-            del tbl
-        mm.flush()
+        mm = np.lib.format.open_memmap(
+            tmp_mat, mode="w+", dtype=np.float32, shape=(n, N_FEATURES)
+        )
+        try:
+            for j, name in enumerate(FEATURE_COLS):
+                tbl = pq.read_table(parquet_path, columns=[name])
+                mm[:, j] = tbl.column(0).to_numpy(zero_copy_only=False)
+                del tbl
+            mm.flush()
+        finally:
+            del mm
+
+        tbl = pq.read_table(parquet_path, columns=["txId"])
+        txids = np.asarray(tbl.column(0).to_numpy(zero_copy_only=False), dtype=np.int64)
+        del tbl
+        with open(tmp_tx, "wb") as fh:
+            np.save(fh, txids)
+        del txids
+
+        os.replace(tmp_mat, mat_path)
+        os.replace(tmp_tx, tx_path)
     finally:
-        del mm
-
-    tbl = pq.read_table(parquet_path, columns=["txId"])
-    txids = np.asarray(tbl.column(0).to_numpy(zero_copy_only=False), dtype=np.int64)
-    del tbl
-    with open(tmp_tx, "wb") as fh:
-        np.save(fh, txids)
-    del txids
-
-    os.replace(tmp_mat, mat_path)
-    os.replace(tmp_tx, tx_path)
+        for tmp_path in (tmp_mat, tmp_tx):
+            try:
+                os.remove(tmp_path)
+            except FileNotFoundError:
+                pass
 
 
 def load_feature_matrix(parquet_path: str):

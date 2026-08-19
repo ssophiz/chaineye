@@ -4,14 +4,15 @@ Bitcoin 자금세탁 탐지 도구의 백엔드 API. 2026 금융 AI Challenge.
 
 ## 실행 (Run)
 
-`app\backend` 디렉터리에서 실행하세요:
+저장소 루트에서 실행하세요:
 
 ```
-cd C:\Users\DELL\fsec-ai-challenge-2026\app\backend
-C:\Users\DELL\fsec-ai-challenge-2026\.venv\Scripts\python.exe -m uvicorn main:app --port 8000
+python -m pip install -r deploy/requirements.txt
+python -m uvicorn app.backend.main:app --port 8000
 ```
 
-- CORS 허용 오리진: `http://localhost:5173`, `http://localhost:3000`
+- CORS 허용 오리진 기본값: `http://localhost:5173`, `http://localhost:3000`
+  (`CHAINEYE_CORS_ORIGINS`의 쉼표 구분 목록으로 변경 가능)
 - Swagger 문서: http://localhost:8000/docs
 
 ## 모델 연동 (MODEL / MOCK 모드)
@@ -21,7 +22,9 @@ C:\Users\DELL\fsec-ai-challenge-2026\.venv\Scripts\python.exe -m uvicorn main:ap
 - **MODEL 모드**: import + `inference.load()` 성공 시. `/score`, `/trace` 는
   `inference.score_tx`, `inference.trace_tx` 로 위임됩니다.
 - **MOCK 모드**: import/load 실패 시(모델 미완성). 내장 mock provider가 동일한
-  스키마의 현실적인 샘플 데이터를 반환하며 `/health` 의 `modelLoaded=false`.
+  스키마의 결정론적 샘플 데이터를 반환하며 `/health` 의 `modelLoaded=false`, `mode="mock"`.
+- MODEL 모드 요청 중 추론 오류가 발생하면 503을 반환한다. 실제 모델 장애를 임의의
+  MOCK 점수로 위장하지 않는다.
 
 어느 모드로 떴는지는 시작 로그에 출력됩니다.
 
@@ -29,7 +32,8 @@ C:\Users\DELL\fsec-ai-challenge-2026\.venv\Scripts\python.exe -m uvicorn main:ap
 
 | Method | Path      | 설명 |
 |--------|-----------|------|
-| GET    | /health   | 상태 및 모델 로드 여부 |
+| GET    | /health   | 상태, 모델 로드 여부, 활성 모드 |
+| GET    | /model-info | 실제 모델의 데이터셋, 평가 지표, 검증 방식, 판정 임계값 |
 | POST   | /score    | 거래 위험 점수(0-100) + 라벨 + topFactors |
 | POST   | /trace    | 자금흐름 그래프(nodes/edges), hops 기본 2 |
 | POST   | /explain  | topFactors 설명(스코어 factors 재사용) |
@@ -39,23 +43,30 @@ C:\Users\DELL\fsec-ai-challenge-2026\.venv\Scripts\python.exe -m uvicorn main:ap
 
 ```
 GET /health
--> {"status":"ok","modelLoaded":false}
+-> {"status":"ok","modelLoaded":false,"mode":"mock"}
 
-POST /score  {"txId":"tx_abc123"}
--> {"txId":"tx_abc123","riskScore":72,"label":"illicit",
+GET /model-info
+-> {"active":true, "activeModel":"LightGBM with graph-neighbor aggregates",
+    "featureCount":165, "localFeatureCount":93, "neighborAggregateFeatureCount":72,
+    "illicitF1":0.805076, "prAuc":0.799495,
+    "localOnlyF1":0.743989, "graphF1Lift":0.061087,
+    "decisionThreshold":0.523810, "validationProtocol":"rolling temporal validation and untouched future test", ...}
+
+POST /score  {"txId":"232629023"}
+-> {"txId":"232629023","riskScore":100,"label":"illicit",
     "topFactors":[{"feature":"mixer_exposure_ratio","impact":0.83}, ...]}
 
-POST /trace  {"txId":"tx_abc123","hops":2}
--> {"nodes":[{"id":"tx_abc123","risk":72,"focus":true}, ...],
-    "edges":[{"source":"tx_abc123","target":"tx_abc_h1_1"}, ...]}
+POST /trace  {"txId":"232629023","hops":2}
+-> {"nodes":[{"id":"232629023","risk":100,"focus":true,"illicit":true}, ...],
+    "edges":[...],"paths":[["232629023", ...]]}
 
-POST /explain {"txId":"tx_abc123"}
--> {"txId":"tx_abc123","topFactors":[{"feature":"...","impact":0.83}, ...]}
+POST /explain {"txId":"232629023"}
+-> {"txId":"232629023","topFactors":[{"feature":"...","impact":0.83}, ...]}
 
-POST /report  {"txId":"tx_abc123","score":72,"label":"illicit",
+POST /report  {"txId":"232629023","score":100,"label":"illicit",
                "topFactors":[...],
-               "graphStats":{"nodeCount":9,"illicitNeighbors":3}}
--> {"report":"━━━ ... 체인아이 자금세탁 위험 분석 보고서 ... ━━━"}
+               "graphStats":{"nodeCount":9,"edgeCount":8,"highRiskCount":2}}
+-> {"report":"# 자금세탁 위험 분석 보고서 ..."}
 ```
 
 ## 보고서 생성 (LLM → 템플릿 폴백)
@@ -90,23 +101,24 @@ POST /report  {"txId":"tx_abc123","score":72,"label":"illicit",
 
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
-| `CHAINEYE_REPORT_PROVIDER` | `claude` | LLM provider 선택: `claude` / `openai` / `auto`(claude 실패 시 openai 시도). 알 수 없는 값은 `claude` 로 처리. |
+| `CHAINEYE_REPORT_PROVIDER` | `claude` | `claude` / `openai` / `auto` / `template`. 알 수 없는 값은 안전하게 템플릿 처리. |
 | `ANTHROPIC_API_KEY`     | (없음)         | Anthropic API 키. **미설정 시 Claude 경로 비활성 → 템플릿 폴백.** |
-| `CHAINEYE_REPORT_MODEL` | `claude-sonnet-5` | Claude 보고서 모델 ID. |
+| `CHAINEYE_REPORT_MODEL` | `claude-opus-5` | Claude 보고서 모델 ID. |
 | `OPENAI_API_KEY`        | (없음)         | OpenAI API 키. **미설정 시 OpenAI 경로 비활성 → 템플릿 폴백.** |
-| `CHAINEYE_OPENAI_MODEL` | `gpt-4o`       | OpenAI 보고서 모델 ID. (구 "Codex" 계열은 폐기됨 — 현행 GPT 채팅 모델 사용) |
+| `CHAINEYE_OPENAI_MODEL` | `gpt-5.6-luna` | OpenAI Responses API 보고서 모델 ID. |
+| `CHAINEYE_CORS_ORIGINS` | 로컬 2개 오리진 | 쉼표로 구분한 별도 프론트엔드 허용 오리진. |
 
 PowerShell 예시:
 
 ```powershell
 # Claude 사용 (기본)
 $env:ANTHROPIC_API_KEY = "sk-ant-..."
-$env:CHAINEYE_REPORT_MODEL = "claude-sonnet-5"   # (선택)
+$env:CHAINEYE_REPORT_MODEL = "claude-opus-5"   # (선택)
 
 # OpenAI 사용
 $env:CHAINEYE_REPORT_PROVIDER = "openai"
 $env:OPENAI_API_KEY = "sk-..."
-$env:CHAINEYE_OPENAI_MODEL = "gpt-4o"            # (선택)
+$env:CHAINEYE_OPENAI_MODEL = "gpt-5.6-luna"       # (선택)
 ```
 
 의존성: LLM 경로를 쓰려면 해당 SDK(`anthropic` 또는 `openai`)가 venv 에 설치되어

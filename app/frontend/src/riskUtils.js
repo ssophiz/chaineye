@@ -14,3 +14,11 @@ export function riskLevel(score) {
 export function isHighRisk(score) {
   return score >= 70
 }
+
+export function featureDisplayName(feature) {
+  const match = /^feat_(\d+)$/.exec(feature)
+  if (!match) return feature
+  const index = Number(match[1])
+  if (index < 93) return `거래 자체 특성 ${index + 1}`
+  return `연결 이웃 집계 특성 ${index - 92}`
+}

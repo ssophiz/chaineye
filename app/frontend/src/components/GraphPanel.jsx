@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useEffect } from 'react'
+import React, { useMemo } from 'react'
 import CytoscapeComponent from 'react-cytoscapejs'
 import { isHighRisk } from '../riskUtils'
 
@@ -27,7 +27,7 @@ function buildElements(trace) {
     return {
       data: {
         id: n.id,
-        label: `${n.id.slice(0, 6)}…`,
+        label: n.id.length > 10 ? `${n.id.slice(0, 6)}…` : n.id,
         risk: n.risk,
         cls,
       },
@@ -122,57 +122,52 @@ const layout = {
   directed: true,
   spacingFactor: 1.3,
   padding: 24,
-  animate: true,
-  animationDuration: 500,
+  animate: false,
 }
 
-export default function GraphPanel({ trace }) {
+export default function GraphPanel({ trace, loading }) {
   const elements = useMemo(() => buildElements(trace), [trace])
-  const animRef = useRef(null)
-
-  // 의심 경로 간선에 marching-ants 애니메이션 적용
-  const registerCy = (cy) => {
-    if (!cy) return
-    if (animRef.current) cancelAnimationFrame(animRef.current)
-    let offset = 0
-    const tick = () => {
-      const eds = cy.edges('.laundering')
-      if (eds.length) {
-        offset = (offset - 1) % 32
-        eds.style('line-dash-offset', offset)
-      }
-      animRef.current = requestAnimationFrame(tick)
-    }
-    animRef.current = requestAnimationFrame(tick)
-  }
-
-  useEffect(
-    () => () => {
-      if (animRef.current) cancelAnimationFrame(animRef.current)
-    },
-    [],
-  )
-
   const pathCount = (trace && trace.paths && trace.paths.length) || 0
 
   return (
-    <div className="panel graph-panel">
-      <h2 className="panel-title">자금 흐름 그래프</h2>
-      {!trace ? (
-        <div className="empty">분석 시 자금 이동 경로가 시각화됩니다.</div>
+    <div className={`panel graph-panel ${!trace ? 'is-empty' : ''}`}>
+      <div className="graph-head">
+        <h2 className="panel-title">자금 흐름 그래프</h2>
+        {trace && (
+          <div className="graph-stats" aria-label="그래프 요약">
+            <span>거래 {trace.nodes.length}</span>
+            <span>이동 {trace.edges.length}</span>
+            <span>의심 경로 {pathCount}</span>
+          </div>
+        )}
+      </div>
+      {loading ? (
+        <div className="graph-skeleton" aria-busy="true">
+          <div className="skeleton-node n1" />
+          <div className="skeleton-node n2" />
+          <div className="skeleton-node n3" />
+          <span className="sr-only">자금 흐름 그래프를 구성하고 있습니다.</span>
+        </div>
+      ) : !trace ? (
+        <div className="empty">
+          <strong>흐름 추적 대기</strong>
+          <span>거래를 선택하면 2홉 이내 자금 이동과 고위험 연결이 표시됩니다.</span>
+        </div>
       ) : (
         <>
-          <div className="graph-canvas">
+          <div
+            className="graph-canvas"
+            role="img"
+            aria-label={`트랜잭션 ${trace.nodes.length}개와 자금 이동 ${trace.edges.length}건의 방향성 그래프`}
+          >
             <CytoscapeComponent
               key={trace.nodes.map((n) => n.id).join(',')}
-              cy={registerCy}
               elements={elements}
               stylesheet={stylesheet}
               layout={layout}
               style={{ width: '100%', height: '100%' }}
               minZoom={0.3}
               maxZoom={2.5}
-              wheelSensitivity={0.2}
             />
           </div>
           <div className="graph-legend">

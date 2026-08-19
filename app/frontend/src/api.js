@@ -4,8 +4,8 @@
 //   예) API_BASE='' , path='/score'  ->  fetch('/score')  (same-origin)
 //       API_BASE='http://localhost:8000' -> fetch('http://localhost:8000/score')
 // =====================================================================
-import { API_BASE, USE_MOCK, DEFAULT_HOPS } from './config'
-import { mockScore, mockTrace, mockReport } from './mockData'
+import { API_BASE, USE_MOCK, DEFAULT_HOPS, DEFAULT_MODEL_INFO } from './config.js'
+import { mockScore, mockTrace, mockReport } from './mockData.js'
 
 // mock 모드에서 실제 네트워크 지연처럼 보이게 하는 약간의 딜레이
 function delay(ms) {
@@ -18,16 +18,49 @@ function buildUrl(path) {
   return `${base}${path}`
 }
 
-async function postJson(path, body) {
-  const res = await fetch(buildUrl(path), {
+const REQUEST_TIMEOUT_MS = 20_000
+
+async function requestJson(path, options = {}) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  try {
+    const res = await fetch(buildUrl(path), {
+      ...options,
+      signal: controller.signal,
+    })
+    const payload = await res.json().catch(() => null)
+    if (!res.ok) {
+      const detail = payload?.detail
+      const message = typeof detail === 'string' ? detail : res.statusText
+      throw new Error(`API ${path} 오류 (${res.status}): ${message}`)
+    }
+    return payload
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error(`API ${path} 요청 시간이 초과되었습니다.`)
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+function postJson(path, body) {
+  return requestJson(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  if (!res.ok) {
-    throw new Error(`API ${path} 오류: ${res.status} ${res.statusText}`)
-  }
-  return res.json()
+}
+
+export function fetchHealth() {
+  if (USE_MOCK) return Promise.resolve({ status: 'ok', modelLoaded: false, mode: 'mock' })
+  return requestJson('/health')
+}
+
+export function fetchModelInfo() {
+  if (USE_MOCK) return Promise.resolve(DEFAULT_MODEL_INFO)
+  return requestJson('/model-info')
 }
 
 // POST /score

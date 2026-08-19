@@ -1,7 +1,7 @@
 """Smoke test for inference.py: verifies load/score_tx/trace_tx shapes."""
 import json
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import inference
@@ -17,6 +17,7 @@ SAMPLES = {
 }
 
 for kind, tx in SAMPLES.items():
+    assert inference.contains_tx(tx) is (kind != "missing")
     r = inference.score_tx(tx)
     assert set(r.keys()) == {"txId", "riskScore", "label", "topFactors"}, r.keys()
     assert isinstance(r["txId"], str)
@@ -32,17 +33,22 @@ for kind, tx in SAMPLES.items():
 
 for kind, tx in [("illicit", "232629023"), ("licit", "232438397")]:
     tr = inference.trace_tx(tx, hops=2)
-    assert set(tr.keys()) == {"nodes", "edges"}
+    assert set(tr.keys()) == {"nodes", "edges", "paths"}
     assert len(tr["nodes"]) <= 60
     foci = [n for n in tr["nodes"] if n["focus"]]
     assert len(foci) == 1 and foci[0]["id"] == tx
     for n in tr["nodes"]:
-        assert set(n.keys()) == {"id", "risk", "focus"}
+        assert set(n.keys()) == {"id", "risk", "focus", "illicit"}
         assert 0 <= n["risk"] <= 100
+        assert n["illicit"] is (n["risk"] >= inference.HIGH_RISK_THRESHOLD)
     ids = {n["id"] for n in tr["nodes"]}
     for e in tr["edges"]:
         assert set(e.keys()) == {"source", "target"}
         assert e["source"] in ids and e["target"] in ids
+    for path in tr["paths"]:
+        assert 2 <= len(path) <= 3
+        assert path[0] == tx
+        assert all(node_id in ids for node_id in path)
     print(f"\ntrace_tx[{kind}] {tx}: {len(tr['nodes'])} nodes, {len(tr['edges'])} edges, "
           f"focus_risk={foci[0]['risk']}")
 
